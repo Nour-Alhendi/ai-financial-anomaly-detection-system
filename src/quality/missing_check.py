@@ -21,7 +21,7 @@ def run_missing_check():
     Run missing value checks for all assets
     """
 
-    data_folder = Path("data/raw/raw_clean")
+    data_folder = Path("data/raw/raw_corrupted")
 
     for file in data_folder.glob("*.parquet"):
         missing_report = check_missing_values(file)

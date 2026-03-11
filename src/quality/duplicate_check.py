@@ -39,7 +39,7 @@ def check_duplicates(file_path):
 # -----------------------------------------------------
 def run_duplicate_check():
 
-    data_folder = Path("data/raw/raw_clean")
+    data_folder = Path("data/raw/raw_corrupted")
 
     for file in data_folder.glob("*.parquet"):
 

@@ -4,11 +4,6 @@
 # Defines the anomaly injection functions and
 # the rates (%) for each anomaly type.
 #
-# Each function randomly picks:
-#   - which column to corrupt
-#   - how to corrupt it (multiple options)
-# This ensures the model does not memorize one pattern.
-#
 # injector.py imports everything from here.
 # =====================================================
 

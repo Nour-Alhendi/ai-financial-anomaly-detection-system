@@ -28,7 +28,7 @@ def check_time_gaps(file_path):
 # Function: run_gap_check
 # =====================================================
 def run_gap_check():
-    data_folder = Path("data/raw/raw_clean")
+    data_folder = Path("data/raw/raw_corrupted")
     for file in data_folder.glob("*.parquet"):
         gaps = check_time_gaps(file)
         

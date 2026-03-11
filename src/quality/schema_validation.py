@@ -56,7 +56,7 @@ def check_schema(file_path):
     if len(df) == 0:
         issues.append("Dataset is empty")
         print(f"  FAIL: Dataset is empty")
-        return None, issues
+        return None, issues, changes
 
     # Duplicate column check
     # Same values → drop duplicate, same values → keep one, different values → reject file
@@ -105,7 +105,7 @@ def check_schema(file_path):
     if missing_cols:
         issues.append(f"Missing required columns: {missing_cols}")
         print(f"  FAIL: Missing required columns: {missing_cols}")
-        return None, issues
+        return None, issues, changes
 
     # Data type validation — Date: datetime, OHLC: float, Volume: int
     if not pd.api.types.is_datetime64_any_dtype(df["Date"]):
@@ -154,7 +154,7 @@ def check_schema(file_path):
 # -----------------------------------------------------
 def run_schema_validation():
 
-    data_folder = Path("data/raw/raw_clean")
+    data_folder = Path("data/raw/raw_corrupted")
     files       = list(data_folder.glob("*.parquet"))
 
     if not files:
@@ -169,13 +169,7 @@ def run_schema_validation():
     passed      = 0
 
     for file in files:
-        result = check_schema(file)
-
-        if len(result) == 3:
-            df, issues, changes = result
-        else:
-            df, issues = result
-            changes    = []
+        df, issues, changes = check_schema(file)
 
         log_lines.append(f"\n[{file.name}]")
 
