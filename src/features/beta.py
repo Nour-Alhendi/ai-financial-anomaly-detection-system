@@ -1,7 +1,7 @@
 import pandas as pd
 from pathlib import Path
 
-INPUT_DIR = Path("data/features")
+INPUT_DIR  = Path("data/features")
 OUTPUT_DIR = Path("data/features")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -16,7 +16,7 @@ def beta(file_path):
     df["beta"] = cov / var
     return df
 
-# loob over all files and saves results
+# loop over all files and saves results
 def run_beta():
     for file in INPUT_DIR.glob("*.parquet"):
         if file.name == "^SPX.parquet":

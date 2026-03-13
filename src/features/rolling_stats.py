@@ -1,7 +1,7 @@
 import pandas as pd
 from pathlib import Path
 
-INPUT_DIR = Path("data/features")
+INPUT_DIR =  Path("data/features")
 OUTPUT_DIR = Path("data/features")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
