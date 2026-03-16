@@ -16,8 +16,8 @@ class Autoencoder(Model):
         self.encoder = layers.Dense(2, activation="relu")
         self.decoder = layers.Dense(4, activation="sigmoid")
 
-    def call(self, x):
-        encoded = self.encoder(x)
+    def call(self, inputs, training=None, mask=None):
+        encoded = self.encoder(inputs)
         decoded = self.decoder(encoded)
         return decoded
 
