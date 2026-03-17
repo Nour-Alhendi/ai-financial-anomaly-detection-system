@@ -9,12 +9,12 @@ from detection.combine import run_combine
 from detection.severity import run_severity
 
 def run():
-    print("--- Layer 4: Anomaly Detection ---")
+    print("––– Layer 4: Anomaly Detection –––")
     run_zscore()
     run_isolation_forest()
     run_autoencoder()
     run_combine()
-    print("--- Layer 5: Severity Scoring ---")
+    print("––– Layer 5: Severity Scoring –––")
     run_severity()
 
 if __name__ == "__main__":

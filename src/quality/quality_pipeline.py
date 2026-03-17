@@ -2,7 +2,9 @@
 # Data Quality Pipeline
 #Run all data validation checks
 #==================================================
-
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent))
 from missing_check import run_missing_check
 from duplicate_check import run_duplicate_check
 from gap_check import run_gap_check
