@@ -37,6 +37,11 @@ def compare(df, spx, etf_data, ticker):
     etf_name = sector_etfs[sector]
     etf_df = etf_data[etf_name]
     df = df.set_index("Date")
+    if "spx_return" in df.columns:
+        df = df.drop(columns=["spx_return"])
+    etf_col = f"{etf_name}_close"
+    if etf_col in df.columns:
+        df = df.drop(columns=[etf_col])
     df = df.join(spx, how="left")
     df = df.join(etf_df, how="left")
 
