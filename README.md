@@ -34,13 +34,20 @@ The system follows an 8-layer modular pipeline:
 | Layer | Name | Description |
 |-------|------|-------------|
 | 1 | Data Ingestion | Stooq API, 55 stocks, 10 years daily OHLCV |
+
 | 2 | Data Quality Checks | Missing values, duplicates, gaps, schema validation |
+
 | 3 | Feature Engineering | Basic (returns, volatility, RSI) + Context (regime, ETFs) + Advanced (momentum, lags) |
+
 | 4 | Anomaly Detection | Z-Score + Isolation Forest + Dual LSTM Autoencoder — combined score + severity |
+
 | 5 | Risk & Direction Prediction | XGBoost Risk (VaR-based, high/low) + XGBoost Direction (up/stable/down) |
-| 6 | Guardrails + Decision Engine | Rule-based decisions per ticker (fix / keep / escalate) |
-| 7 | Reporting + XAI | SHAP explainability, anomaly context, alerts |
-| 8 | Logging & Audit | Full audit trail of all decisions |
+
+| 6 | Guardrails + Decision Engine | Rule-based priority matrix: Risk × Direction → Severity + Action |
+
+| 7 | XAI + Narrative Engine + Reporting | SHAP, Narrative Engine, LLM summaries, FinBERT news sentiment |
+
+| 8 | Logging & Audit | Persistent audit log + daily management summary |
 
 ---
 
@@ -57,14 +64,18 @@ The system follows an 8-layer modular pipeline:
 
 - Multi-asset monitoring (55 stocks, 10 sector ETFs)
 - Three-layer anomaly detection (Statistical + ML + Deep Learning)
-- Severity classification (normal / watch / warning / critical)
+- Severity classification (CRITICAL / WARNING / WATCH / NORMAL / POSITIVE_MOMENTUM / REVIEW)
 - Market context (market-wide vs sector-specific vs stock-specific anomaly)
 - Market regime detection (Bull / Bear / Transition)
 - Risk classification with XGBoost (VaR-based labels, high/low)
 - Direction prediction with XGBoost (up/stable/down, 5-day horizon)
 - Expected Shortfall (VaR 95% + ES tail risk per ticker)
-- Explainability layer (XAI + SHAP)
-- Full audit logging
+- SHAP-based explainability (top-3 drivers per ticker)
+- Narrative Engine + LLM summaries in plain English
+- FinBERT news sentiment analysis
+- Streamlit dashboard (FinWatch AI)
+- Stress testing framework (11 data corruption scenarios)
+- Full audit logging + daily management report
 
 ---
 
@@ -83,36 +94,43 @@ It is a **monitoring and decision-support framework**.
 ```
 ai-monitoring-system/
 ├── config/
-│   └── assets.yaml          # Stock tickers, sectors, ETF mappings
+│   └── assets.yaml              # Stock tickers, sectors, ETF mappings
 ├── data/
-│   ├── raw/                 # Downloaded OHLCV data
-│   ├── features/            # Engineered features
-│   ├── detection/           # Anomaly detection results
-│   ├── context/             # Contextual validation results
-│   └── risk/                # ES snapshots for Layer 6 (Decision Engine)
+│   ├── raw/                     # Downloaded OHLCV data
+│   ├── features/                # Engineered features
+│   ├── detection/               # Anomaly detection results
+│   ├── decisions/               # Decision engine output
+│   ├── explanations/            # SHAP + LLM summaries
+│   ├── logs/                    # Audit trail
+│   ├── reports/                 # Daily management summaries
+│   └── risk/                    # Expected Shortfall snapshots
 ├── src/
-│   ├── ingestion/           # Layer 1: Data download
-│   ├── quality/             # Layer 2: Quality checks
-│   ├── features/            # Layer 3: Feature engineering
-│   ├── detection/           # Layer 4: Anomaly detection
-│   ├── prediction/          # Layer 5: Risk & Direction prediction
-│   │   ├── expected_shortfall.py    # VaR + ES tail risk (writes to detection parquets)
-│   │   ├── prediction_pipeline.py   # Orchestrates ES → Risk → Direction
-│   │   ├── xgboost_risk.py          # High/low risk classifier
-│   │   └── xgboost_direction.py     # up/stable/down direction classifier
-│   ├── decision/            # Layer 6: Guardrails + Decision engine
-│   ├── reporting/           # Layer 7: XAI + Reporting (WIP)
-│   └── pipeline.py          # Main entry point
-├── notebooks/               # Exploration and analysis
-└── ARCHITECTURE.md          # Detailed architecture documentation
+│   ├── ingestion/               # Layer 1: Data download
+│   ├── quality/                 # Layer 2: Data quality checks
+│   ├── features/                # Layer 3: Feature engineering
+│   │   ├── basic/               # Returns, volatility, RSI, beta, drawdown
+│   │   ├── context/             # Regime, ETFs, excess return
+│   │   └── advanced/            # Momentum, lags, vol_change, trend
+│   ├── detection/               # Layer 4: Anomaly detection
+│   ├── prediction/              # Layer 5: Risk & Direction prediction
+│   │   ├── features/            # ES + OBV signal computation
+│   │   └── models/              # XGBoost risk + direction classifiers
+│   ├── decision/                # Layer 6: Decision engine
+│   ├── explainability/          # Layer 7: SHAP, Narrative Engine, LLM, FinBERT
+│   ├── reporting/               # Layer 8: Audit log + daily report
+│   ├── intelligence/            # RAG knowledge base (retriever + narrator)
+│   └── pipeline.py              # Main entry point (end-to-end)
+├── app.py                       # Streamlit dashboard (FinWatch AI)
+├── models/                      # Trained model files (.pkl, .keras)
+├── knowledge_base/              # Documents for RAG retrieval
+└── ARCHITECTURE.md              # Detailed architecture documentation
 ```
 
 ---
 
 ## Future Improvements
 
-- FinBERT news sentiment analysis
 - Real-time / intraday data (yfinance 1h)
-- Streamlit dashboard
-- Performance benchmarking
-- Expanded asset universe
+- Performance benchmarking against buy-and-hold baseline
+- Expanded asset universe (international markets, crypto)
+- Alert delivery via email / Slack

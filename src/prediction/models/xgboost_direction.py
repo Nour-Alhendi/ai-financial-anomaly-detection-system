@@ -6,7 +6,7 @@ from xgboost import XGBClassifier
 from sklearn.preprocessing import LabelEncoder
 from sklearn.utils.class_weight import compute_sample_weight
 
-ROOT      = Path(__file__).resolve().parents[2]
+ROOT      = Path(__file__).resolve().parents[3]
 DATA_DIR  = ROOT / "data/detection"
 MODEL_DIR = ROOT / "models"
 MODEL_DIR.mkdir(parents=True, exist_ok=True)

@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 
-ROOT       = Path(__file__).resolve().parents[2]
+ROOT       = Path(__file__).resolve().parents[3]
 DATA_DIR   = ROOT / "data/detection"
 OUTPUT_DIR = ROOT / "data/risk"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
