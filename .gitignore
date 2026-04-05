@@ -14,3 +14,9 @@ data/
 
 # Jupyter checkpoints
 .ipynb_checkpoints/
+
+# Claude Code internal memory
+.claude/
+
+# Notebooks (local experimentation only)
+notebooks/
