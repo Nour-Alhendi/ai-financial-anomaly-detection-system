@@ -532,8 +532,8 @@ def run():
     print(f"  Date range: {data['Date'].min().date()} → {data['Date'].max().date()}")
 
     print("Adding stock-specific MA features...")
-    from prediction.models.drawdown_probability import _add_stock_ma_features
-    data = _add_stock_ma_features(data)
+    from prediction.features.technical_signals import add_stock_ma_features
+    data = add_stock_ma_features(data)
 
     print("Adding VIX context...")
     data = add_vix(data)

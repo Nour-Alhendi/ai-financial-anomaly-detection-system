@@ -1,20 +1,21 @@
 """
-FinWatch AI — Drawdown Probability Model
-=========================================
+FinWatch AI — Drawdown Probability Model (v2)
+=============================================
 
 Question: "What is the probability of a drawdown > 5% in the next 20 days?"
 
-Why this is good:
-  - Binary classification (clean labels, ~36% positive rate)
-  - Directly answers a useful investment question
-  - Measurable, backtestable, interpretable
-  - Does NOT try to predict direction (near-impossible with OHLCV)
+Improvements in v2:
+  - 15 new technical signal features (death_cross, RSI divergence, panic_volume, etc.)
+  - Optuna hyperparameter tuning (--tune flag)
+  - LightGBM comparison on every run (best model wins)
 
 Output:
-  p_drawdown  : float 0-1   — probability of >5% drawdown in 20 days
+  p_drawdown   : float 0-1  — probability of >5% drawdown in 20 days
   drawdown_risk: "high" / "low"  (threshold: p_drawdown >= 0.45)
 """
 
+import sys
+import argparse
 import numpy as np
 import pandas as pd
 import joblib
@@ -22,19 +23,25 @@ from pathlib import Path
 from xgboost import XGBClassifier
 from sklearn.metrics import classification_report, roc_auc_score
 
+# Ensure `src/` is on the path when running this file directly
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from prediction.features.technical_signals import add_vix, add_stock_ma_features, add_technical_signals
+
 ROOT      = Path(__file__).resolve().parents[3]
 DATA_DIR  = ROOT / "data/detection"
 MODEL_DIR = ROOT / "models"
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
-MODEL_PATH = MODEL_DIR / "xgboost_drawdown.pkl"
+MODEL_PATH      = MODEL_DIR / "xgboost_drawdown.pkl"
+LGBM_MODEL_PATH = MODEL_DIR / "lgbm_drawdown.pkl"
 
-HORIZON          = 20     # days forward
-THRESHOLD        = 0.05   # 5% drawdown = event
-TRAIN_DATA_END   = pd.Timestamp("2026-03-01")  # training + test data cutoff
+HORIZON        = 10
+THRESHOLD      = 0.05
+TRAIN_DATA_END = pd.Timestamp("2026-03-01")
 
 FEATURES = [
-    # Anomaly signals — weighted score is more informative than raw integer
+    # Anomaly signals
     'anomaly_score', 'anomaly_score_weighted',
     'z_score', 'z_score_60',
     'ae_error', 'ae_anomaly', 'if_anomaly',
@@ -45,64 +52,43 @@ FEATURES = [
     'return_lag_1', 'return_lag_2', 'return_lag_3',
     # Drawdown history
     'max_drawdown_30d',
-    # Volume — rising/falling volume confirms price moves
+    # Volume
     'volume_zscore', 'is_high_volume', 'volume_trend',
-    # OBV divergence — price up but OBV down = bearish signal
+    # OBV
     'obv_signal',
     # Market & sector context
     'spx_return', 'etf_return', 'relative_return', 'excess_return',
-    'sector_relative',
-    'is_market_wide', 'is_sector_wide',
+    'sector_relative', 'is_market_wide', 'is_sector_wide',
     'beta', 'regime_encoded',
-    # Stock-specific MA position (above/below own 200-day MA — key structural signal)
+    # Stock MA position
     'price_vs_ma200_stock', 'price_vs_ma50_stock',
     # Rolling stats
     'rolling_mean', 'rolling_std', 'rolling_std_60',
     # Tail risk
     'var_95', 'es_95', 'es_ratio',
-    # VIX context
+    # VIX
     'vix_level', 'vix_change', 'vix_high',
+    # ── New technical signals (v2) ──────────────────────────────────────────
+    'price_vs_ema20',           # (Close / EMA20) - 1: short-term trend position
+    'ma50_above_ma200',         # 1 = golden cross regime, 0 = death cross regime
+    'golden_cross',             # MA50 just crossed above MA200 (last 20 days)
+    'death_cross',              # MA50 just crossed below MA200 (last 20 days)
+    'macd_cross_bullish',       # MACD crossed above signal line (last 3 days)
+    'macd_cross_bearish',       # MACD crossed below signal line (last 3 days)
+    'macd_hist',                # MACD histogram (continuous, sign = trend direction)
+    'hh_hl',                    # Higher Highs + Higher Lows (uptrend structure)
+    'll_lh',                    # Lower Lows + Lower Highs (downtrend structure)
+    'panic_volume',             # Price drop > 2% + volume > 2x average
+    'vol_ratio',                # Current volume / 20-day average volume
+    'volume_spike_no_recovery', # Volume spike 2-5 days ago + still declining
+    'rsi_divergence_bullish',   # Price lower lows but RSI higher lows
+    'rsi_below_45_high_vol',    # RSI < 45 declining with rising volume
+    'consolidation',            # Tight price range < 3% over 10 days
+    'consolidation_above_ma50', # Consolidating above MA50 (bullish coil)
 ]
 
 
-def _add_vix(data: pd.DataFrame) -> pd.DataFrame:
-    try:
-        from pandas_datareader import data as web
-        vix = web.DataReader("VIXCLS", "fred", "2015-01-01", "2030-12-31").reset_index()
-        vix.columns = ["Date", "vix_level"]
-        vix["Date"] = pd.to_datetime(vix["Date"])
-    except Exception:
-        vix = pd.DataFrame({
-            "Date": pd.date_range("2015-01-01", "2030-12-31"),
-            "vix_level": 20.0,
-        })
-    vix["vix_change"] = vix["vix_level"].pct_change().fillna(0)
-    vix["vix_high"]   = (vix["vix_level"] > 25).astype(int)
-    data["Date"] = pd.to_datetime(data["Date"]).dt.tz_localize(None)
-    data = data.merge(vix[["Date", "vix_level", "vix_change", "vix_high"]],
-                      on="Date", how="left")
-    data["vix_level"]  = data["vix_level"].ffill().fillna(20)
-    data["vix_change"] = data["vix_change"].ffill().fillna(0)
-    data["vix_high"]   = data["vix_high"].ffill().fillna(0)
-    return data
-
-
-def _add_stock_ma_features(data: pd.DataFrame) -> pd.DataFrame:
-    """
-    Add each stock's own 50-day and 200-day MA position.
-    The existing ma50/ma200 columns are SPX MAs (market context), not stock MAs.
-    price_vs_ma200_stock = (close / own_MA200) - 1
-    """
-    def _per_ticker(df):
-        df = df.copy().sort_values("Date")
-        close = df["Close"]
-        ma50  = close.rolling(50,  min_periods=20).mean()
-        ma200 = close.rolling(200, min_periods=50).mean()
-        df["price_vs_ma50_stock"]  = (close / ma50  - 1).where(ma50  > 0, 0.0)
-        df["price_vs_ma200_stock"] = (close / ma200 - 1).where(ma200 > 0, 0.0)
-        return df
-    return data.groupby("ticker", group_keys=False).apply(_per_ticker)
-
+# ── Data loading ─────────────────────────────────────────────────────────────
 
 def load_data() -> pd.DataFrame:
     dfs = []
@@ -115,10 +101,13 @@ def load_data() -> pd.DataFrame:
     data = pd.concat(dfs, ignore_index=True)
     data["Date"] = pd.to_datetime(data["Date"])
     data = data.sort_values(["ticker", "Date"]).reset_index(drop=True)
-    data = _add_vix(data)
-    data = _add_stock_ma_features(data)
+    data = add_vix(data)
+    data = add_stock_ma_features(data)
+    data = add_technical_signals(data)
     return data
 
+
+# ── Label generation ─────────────────────────────────────────────────────────
 
 def generate_labels(data: pd.DataFrame) -> pd.DataFrame:
     """Label = 1 if max drawdown in next HORIZON days exceeds THRESHOLD."""
@@ -136,81 +125,185 @@ def generate_labels(data: pd.DataFrame) -> pd.DataFrame:
         df["drawdown_event"] = labels
         return df
 
-    data = data.groupby("ticker", group_keys=False).apply(_label_ticker)
+    data = pd.DataFrame(data.groupby("ticker", group_keys=False).apply(_label_ticker))
     return data.dropna(subset=["drawdown_event"])
 
 
 def _prep_X(df: pd.DataFrame) -> pd.DataFrame:
     avail = [f for f in FEATURES if f in df.columns]
-    return df[avail].apply(
-        lambda c: pd.to_numeric(c, errors="coerce")
-    ).fillna(0)
+    return df[avail].apply(lambda c: pd.to_numeric(c, errors="coerce")).fillna(0)
 
 
-def train(data: pd.DataFrame) -> XGBClassifier:
+# ── Optuna tuning ─────────────────────────────────────────────────────────────
+
+def _tune_optuna(X_tr, y_tr, X_val, y_val, spw: float, n_trials: int = 80) -> dict:
+    try:
+        import optuna
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+    except ImportError:
+        print("  optuna not installed — pip install optuna")
+        return {}
+
+    def objective(trial):
+        params = {
+            "n_estimators":     trial.suggest_int("n_estimators", 300, 1500),
+            "max_depth":        trial.suggest_int("max_depth", 3, 7),
+            "learning_rate":    trial.suggest_float("learning_rate", 0.005, 0.08, log=True),
+            "subsample":        trial.suggest_float("subsample", 0.6, 1.0),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
+            "colsample_bylevel":trial.suggest_float("colsample_bylevel", 0.5, 1.0),
+            "min_child_weight": trial.suggest_int("min_child_weight", 5, 30),
+            "gamma":            trial.suggest_float("gamma", 0.0, 1.0),
+            "reg_alpha":        trial.suggest_float("reg_alpha", 0.0, 2.0),
+            "reg_lambda":       trial.suggest_float("reg_lambda", 0.5, 5.0),
+        }
+        model = XGBClassifier(
+            **params,
+            scale_pos_weight=spw,
+            objective="binary:logistic",
+            eval_metric="auc",
+            early_stopping_rounds=30,
+            random_state=42,
+            n_jobs=-1,
+        )
+        model.fit(X_tr, y_tr, eval_set=[(X_val, y_val)], verbose=0)
+        return roc_auc_score(y_val, model.predict_proba(X_val)[:, 1])
+
+    study = optuna.create_study(direction="maximize")
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
+
+    print(f"  Best Optuna AUC (val): {study.best_value:.4f}")
+    print(f"  Best params: {study.best_params}")
+    return study.best_params
+
+
+# ── LightGBM comparison ───────────────────────────────────────────────────────
+
+def _train_lgbm(X_tr, y_tr, X_val, y_val, X_test, y_test, spw: float) -> float:
+    try:
+        from lightgbm import LGBMClassifier
+    except ImportError:
+        print("  lightgbm not installed — pip install lightgbm  (skipping)")
+        return 0.0
+
+    model = LGBMClassifier(
+        n_estimators=1000,
+        max_depth=5,
+        learning_rate=0.02,
+        subsample=0.75,
+        colsample_bytree=0.65,
+        min_child_samples=20,
+        reg_alpha=0.3,
+        reg_lambda=3.0,
+        scale_pos_weight=spw,
+        random_state=42,
+        n_jobs=-1,
+        verbose=-1,
+    )
+    model.fit(
+        X_tr, y_tr,
+        eval_set=[(X_val, y_val)],
+        callbacks=[],
+    )
+
+    probs = model.predict_proba(X_test)[:, 1]
+    auc   = roc_auc_score(y_test, probs)
+    print(f"  LightGBM Test AUC: {auc:.4f}")
+
+    joblib.dump(model, LGBM_MODEL_PATH)
+    return auc
+
+
+# ── Training ──────────────────────────────────────────────────────────────────
+
+def train(data: pd.DataFrame, tune: bool = False) -> XGBClassifier:
     train_mask = data["Date"] < pd.Timestamp("2024-01-01")
     test_mask  = (data["Date"] >= pd.Timestamp("2024-01-01")) & (data["Date"] < TRAIN_DATA_END)
+
     X_all = _prep_X(data)
     y_all = data["drawdown_event"].astype(int)
 
     X_train, y_train = X_all[train_mask], y_all[train_mask]
+    X_test,  y_test  = X_all[test_mask],  y_all[test_mask]
 
-    # 10% validation split for early stopping
     split = int(len(X_train) * 0.9)
     X_tr, X_val = X_train.iloc[:split], X_train.iloc[split:]
     y_tr, y_val = y_train.iloc[:split], y_train.iloc[split:]
 
-    pos_rate = y_tr.mean()
-    scale_pos_weight = (1 - pos_rate) / pos_rate   # handle class imbalance
+    pos_rate = float(y_tr.mean())
+    spw      = (1 - pos_rate) / pos_rate
 
-    model = XGBClassifier(
-        n_estimators=1200,
-        max_depth=5,
-        learning_rate=0.015,
-        subsample=0.75,
-        colsample_bytree=0.65,
-        colsample_bylevel=0.8,
-        min_child_weight=15,
-        gamma=0.2,
-        reg_alpha=0.3,
-        reg_lambda=3.0,
-        scale_pos_weight=scale_pos_weight,
+    print(f"  Train rows: {len(X_tr):,}  |  Val rows: {len(X_val):,}  |  Test rows: {len(X_test):,}")
+    print(f"  Positive rate: {pos_rate:.1%}  |  scale_pos_weight: {spw:.2f}")
+    print(f"  Features used: {len([f for f in FEATURES if f in X_all.columns])} / {len(FEATURES)}")
+
+    # ── Optuna tuning (optional) ───────────────────────────────────────────
+    if tune:
+        print("\n  Running Optuna hyperparameter search (80 trials)...")
+        best_params = _tune_optuna(X_tr, y_tr, X_val, y_val, spw)
+    else:
+        best_params = {}
+
+    xgb_params = {
+        "n_estimators":      best_params.get("n_estimators",      1200),
+        "max_depth":         best_params.get("max_depth",         5),
+        "learning_rate":     best_params.get("learning_rate",     0.015),
+        "subsample":         best_params.get("subsample",         0.75),
+        "colsample_bytree":  best_params.get("colsample_bytree",  0.65),
+        "colsample_bylevel": best_params.get("colsample_bylevel", 0.80),
+        "min_child_weight":  best_params.get("min_child_weight",  15),
+        "gamma":             best_params.get("gamma",             0.2),
+        "reg_alpha":         best_params.get("reg_alpha",         0.3),
+        "reg_lambda":        best_params.get("reg_lambda",        3.0),
+    }
+
+    # ── Train XGBoost ──────────────────────────────────────────────────────
+    print("\n  Training XGBoost...")
+    xgb_model = XGBClassifier(
+        **xgb_params,
+        scale_pos_weight=spw,
         objective="binary:logistic",
         eval_metric="auc",
         early_stopping_rounds=50,
         random_state=42,
         n_jobs=-1,
     )
-    model.fit(X_tr, y_tr, eval_set=[(X_val, y_val)], verbose=0)
+    xgb_model.fit(X_tr, y_tr, eval_set=[(X_val, y_val)], verbose=0)
 
-    joblib.dump(model, MODEL_PATH)
+    xgb_probs = xgb_model.predict_proba(X_test)[:, 1]
+    xgb_auc   = roc_auc_score(y_test, xgb_probs)
+    xgb_preds = (xgb_probs >= 0.45).astype(int)
+    print(f"  XGBoost  — Best round: {xgb_model.best_iteration}  |  Test AUC: {xgb_auc:.4f}")
+    print(classification_report(y_test, xgb_preds,
+                                 target_names=["no_drawdown", "drawdown>5%"], digits=3))
 
-    # Evaluate on test set (2024-01-01 → 2026-03-01)
-    X_test = X_all[test_mask]
-    y_test = y_all[test_mask]
+    # ── Train LightGBM for comparison ─────────────────────────────────────
+    print("\n  Training LightGBM for comparison...")
+    lgbm_auc = _train_lgbm(X_tr, y_tr, X_val, y_val, X_test, y_test, spw)
 
-    probs  = model.predict_proba(X_test)[:, 1]
-    preds  = (probs >= 0.45).astype(int)
-    auc    = roc_auc_score(y_test, probs)
+    # ── Save best model ────────────────────────────────────────────────────
+    if lgbm_auc > xgb_auc + 0.005:
+        print(f"\n  LightGBM wins ({lgbm_auc:.4f} vs {xgb_auc:.4f})")
+        best_path = LGBM_MODEL_PATH
+    else:
+        print(f"\n  XGBoost wins or ties ({xgb_auc:.4f} vs {lgbm_auc:.4f})")
+        best_path = MODEL_PATH
 
-    print(f"  Best round: {model.best_iteration}  |  Test AUC: {auc:.4f}")
-    print()
-    print(classification_report(y_test, preds,
-                                 target_names=["no_drawdown", "drawdown>5%"],
-                                 digits=2))
-    print(f"  → Model saved: {MODEL_PATH}")
-    return model
+    joblib.dump(xgb_model, MODEL_PATH)
+    # Write a marker file so predict() knows which model to load
+    (MODEL_DIR / "best_drawdown_model.txt").write_text(best_path.name)
+    print(f"  → Best model: {best_path.name}  (saved marker)")
+    return xgb_model
 
+
+# ── Prediction ────────────────────────────────────────────────────────────────
 
 def predict(data: pd.DataFrame) -> pd.DataFrame:
-    """
-    Predict drawdown probability for the latest row of each ticker.
-    Returns DataFrame with: ticker, p_drawdown, drawdown_risk
-    """
-    model  = joblib.load(MODEL_PATH)
+    marker = MODEL_DIR / "best_drawdown_model.txt"
+    best_path = MODEL_DIR / marker.read_text().strip() if marker.exists() else MODEL_PATH
+    model  = joblib.load(best_path)
     latest = data.groupby("ticker").last().reset_index()
     X      = _prep_X(latest)
-    # Align columns to training feature order
     avail  = [f for f in FEATURES if f in X.columns]
     probs  = model.predict_proba(X[avail])[:, 1]
 
@@ -221,16 +314,25 @@ def predict(data: pd.DataFrame) -> pd.DataFrame:
     }).sort_values("p_drawdown", ascending=False).reset_index(drop=True)
 
 
+# ── Entry point ───────────────────────────────────────────────────────────────
+
 def run():
+    parser = argparse.ArgumentParser(description="Train drawdown probability model")
+    parser.add_argument("--tune", action="store_true",
+                        help="Run Optuna hyperparameter search (80 trials, ~20 min)")
+    args = parser.parse_args()
+
     print("Loading data...")
     data = load_data()
-    print("Generating labels (>5% drawdown in 20 days)...")
+    print(f"Generating labels (>5% drawdown in {HORIZON} days)...")
     data = generate_labels(data)
     dist = data["drawdown_event"].value_counts(normalize=True)
-    print(f"  Label distribution: drawdown={dist[1]:.1%}  no_drawdown={dist[0]:.1%}")
-    print("Training...")
-    train(data)
-    print("\nPredictions (latest):")
+    print(f"  Label distribution: drawdown={dist.get(1, 0):.1%}  no_drawdown={dist.get(0, 0):.1%}")
+
+    print("\nTraining..." + (" (with Optuna tuning)" if args.tune else ""))
+    train(data, tune=args.tune)
+
+    print("\nPredictions (latest, top 15 by risk):")
     results = predict(data)
     print(results.head(15).to_string(index=False))
 

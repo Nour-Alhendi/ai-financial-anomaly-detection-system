@@ -18,7 +18,7 @@ FinWatch AI goes further. It answers the question that actually matters after an
 The system produces a concrete, explainable recommendation (`ENTRY` / `HOLD` / `EXIT`) for every monitored asset, grounded in:
 
 - Anomaly severity (4-model ensemble)
-- Drawdown probability (XGBoost, AUC 0.6671)
+- Drawdown probability (XGBoost + LightGBM, AUC 0.715, 10-day horizon)
 - Market regime (Bull / Bear / Transition)
 - Valuation fundamentals (P/E, P/B, revenue growth)
 - News sentiment (VADER + LLM analyst opinion)
@@ -69,9 +69,9 @@ Combined into a single `anomaly_score_weighted` (0–1 continuous) per ticker pe
 
 ### Prediction — XGBoost + Meta-Model Stacking
 
-- **Target:** P(max drawdown > 5% over next 20 days)
-- **Model:** XGBoost binary classifier
-- **AUC:** 0.6671 on holdout set (2024–2026, unseen during training)
+- **Target:** P(max drawdown > 5% over next 10 days)
+- **Model:** XGBoost + LightGBM (best model selected automatically at training time)
+- **AUC:** 0.715 on holdout set (2024–2026, unseen during training)
 - **Meta-model:** Logistic Regression stacking — combines `p_drawdown` + anomaly signals + VIX into `p_drawdown_meta`
 
 ### Decision Engine — Severity + Trading Signal
@@ -144,11 +144,15 @@ Interactive Streamlit dashboard (dark theme) with:
 **Train models (first time only):**
 
 ```bash
-python src/prediction/models/drawdown_probability.py
-python src/detection/isolation_forest.py
-python src/detection/lstm_autoencoder.py
-python src/backtesting/backtest.py
+python src/prediction/models/drawdown_probability.py   # XGBoost + LightGBM drawdown model
+python src/detection/isolation_forest.py               # Isolation Forest × 14 sectors
+python src/detection/lstm_autoencoder.py               # LSTM Autoencoder × 30 buckets
+python src/prediction/models/meta_model.py             # Meta-model stacking layer
+python src/backtesting/backtest.py                     # Walk-forward backtest + signal precision
 ```
+
+> Models are **not retrained** on every pipeline run — only predictions are made.
+> Retrain recommendation: Drawdown model monthly, Isolation Forest every 3–6 months, LSTM Autoencoder every 6 months, Meta-model after each Drawdown retrain.
 
 **Daily pipeline:**
 

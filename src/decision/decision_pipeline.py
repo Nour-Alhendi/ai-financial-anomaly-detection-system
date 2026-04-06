@@ -17,10 +17,11 @@ ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(ROOT / ".env")          # load FINNHUB_API_KEY and other secrets
 sys.path.insert(0, str(ROOT / "src"))
 
-from prediction.models.drawdown_probability import load_data, predict as predict_drawdown
-from prediction.models.meta_model          import predict_batch as meta_predict_batch, MODEL_PATH as META_MODEL_PATH
-from decision.decision_engine               import run_decision_engine
-from explainability.finbert                 import fetch_news
+from prediction.models.drawdown_probability  import load_data, predict as predict_drawdown
+from prediction.models.meta_model           import predict_batch as meta_predict_batch, MODEL_PATH as META_MODEL_PATH
+from prediction.features.technical_signals  import TECHNICAL_SIGNAL_COLS
+from decision.decision_engine                import run_decision_engine
+from explainability.finbert                  import fetch_news
 
 DATA_DIR = ROOT / "data/detection"
 OUT_DIR  = ROOT / "data/decisions"
@@ -226,7 +227,16 @@ def run(cutoff_date=None):
     # ── 3e. Compute stock-specific MA positions (not SPX MAs)
     print("[3e/4] Computing stock MA positions...")
     ma_positions = _compute_stock_ma_positions(cutoff)
-    print(f"  MA positions computed for {len(ma_positions)} tickers.")
+
+    # ── 3f. Extract technical signals from loaded data (computed by add_technical_signals)
+    print("[3f/4] Extracting technical signals from loaded data...")
+    avail_tech  = [c for c in TECHNICAL_SIGNAL_COLS if c in data.columns]
+    tech_latest = data.groupby("ticker").last().reset_index()
+    tech_signals = {
+        row["ticker"]: {col: row[col] for col in avail_tech}
+        for _, row in tech_latest.iterrows()
+    }
+    print(f"  Technical signals extracted for {len(tech_signals)} tickers.")
 
     # ── 4. Merge
     merged = drawdown_df.merge(detection_df, on="ticker")
@@ -235,6 +245,11 @@ def run(cutoff_date=None):
     vix_map = (
         data.groupby("ticker")["vix_level"].last()
         if "vix_level" in data.columns
+        else {}
+    )
+    vix_change_map = (
+        data.groupby("ticker")["vix_change"].last()
+        if "vix_change" in data.columns
         else {}
     )
 
@@ -292,6 +307,28 @@ def run(cutoff_date=None):
             "regime":         str(row.get("regime", "unknown")) if pd.notna(row.get("regime")) else "unknown",
             "volume_trend":   float(row["volume_trend"]) if pd.notna(row.get("volume_trend")) else 1.0,
             "trend_strength": float(row["trend_strength"]) if pd.notna(row.get("trend_strength")) else 0.0,
+            "vix_change":          float(vix_change_map.get(row["ticker"], 0.0)),
+            # Bullish technical signals
+            "price_vs_ema20":           tech_signals.get(row["ticker"], {}).get("price_vs_ema20",           0.0),
+            "golden_cross":             tech_signals.get(row["ticker"], {}).get("golden_cross",             False),
+            "rsi_oversold_bounce":      tech_signals.get(row["ticker"], {}).get("rsi_oversold_bounce",      False),
+            "macd_cross_bullish":       tech_signals.get(row["ticker"], {}).get("macd_cross_bullish",       False),
+            "hh_hl":                    tech_signals.get(row["ticker"], {}).get("hh_hl",                    False),
+            "volume_breakout":          tech_signals.get(row["ticker"], {}).get("volume_breakout",          False),
+            # Bearish technical signals
+            "death_cross":              tech_signals.get(row["ticker"], {}).get("death_cross",              False),
+            "ll_lh":                    tech_signals.get(row["ticker"], {}).get("ll_lh",                    False),
+            "macd_cross_bearish":       tech_signals.get(row["ticker"], {}).get("macd_cross_bearish",       False),
+            "panic_volume":             tech_signals.get(row["ticker"], {}).get("panic_volume",             False),
+            "volume_spike_no_recovery": tech_signals.get(row["ticker"], {}).get("volume_spike_no_recovery", False),
+            "rsi_below_50_high_vol":    bool(tech_signals.get(row["ticker"], {}).get("rsi_below_45_high_vol", False)),
+            "rsi_oversold_no_bounce":   tech_signals.get(row["ticker"], {}).get("rsi_oversold_no_bounce",   False),
+            # Neutral / WATCH signals
+            "low_volume":                  tech_signals.get(row["ticker"], {}).get("low_volume",                  False),
+            "consolidation":               tech_signals.get(row["ticker"], {}).get("consolidation",               False),
+            "consolidation_above_ma50":    tech_signals.get(row["ticker"], {}).get("consolidation_above_ma50",    False),
+            # Divergence
+            "rsi_divergence_bullish":      tech_signals.get(row["ticker"], {}).get("rsi_divergence_bullish",      False),
         })
 
     # ── 6. Run Decision Engine
@@ -303,16 +340,33 @@ def run(cutoff_date=None):
     # Carry AnomalyInput context fields (valuation, MA, regime) for dashboard display
     context_rows = [
         {
-            "ticker":          r["ticker"],
-            "pe_ratio":        r.get("pe_ratio"),
-            "pe_forward":      r.get("pe_forward"),
-            "pb_ratio":        r.get("pb_ratio"),
-            "revenue_growth":  r.get("revenue_growth"),
-            "price_vs_ma200":  r.get("price_vs_ma200", 0.0),
-            "price_vs_ma50":   r.get("price_vs_ma50",  0.0),
-            "regime":          r.get("regime", "unknown"),
-            "volume_trend":    r.get("volume_trend", 1.0),
-            "trend_strength":  r.get("trend_strength", 0.0),
+            "ticker":               r["ticker"],
+            "pe_ratio":             r.get("pe_ratio"),
+            "pe_forward":           r.get("pe_forward"),
+            "pb_ratio":             r.get("pb_ratio"),
+            "revenue_growth":       r.get("revenue_growth"),
+            "price_vs_ma200":       r.get("price_vs_ma200", 0.0),
+            "price_vs_ma50":        r.get("price_vs_ma50",  0.0),
+            "regime":               r.get("regime", "unknown"),
+            "volume_trend":         r.get("volume_trend", 1.0),
+            "trend_strength":       r.get("trend_strength", 0.0),
+            "price_vs_ema20":            r.get("price_vs_ema20",           0.0),
+            "golden_cross":              r.get("golden_cross",             False),
+            "rsi_oversold_bounce":       r.get("rsi_oversold_bounce",      False),
+            "macd_cross_bullish":        r.get("macd_cross_bullish",       False),
+            "hh_hl":                     r.get("hh_hl",                    False),
+            "volume_breakout":           r.get("volume_breakout",          False),
+            "death_cross":               r.get("death_cross",              False),
+            "ll_lh":                     r.get("ll_lh",                    False),
+            "macd_cross_bearish":        r.get("macd_cross_bearish",       False),
+            "panic_volume":              r.get("panic_volume",             False),
+            "volume_spike_no_recovery":  r.get("volume_spike_no_recovery", False),
+            "rsi_below_50_high_vol":     r.get("rsi_below_50_high_vol",    False),
+            "rsi_oversold_no_bounce":    r.get("rsi_oversold_no_bounce",   False),
+            "low_volume":                  r.get("low_volume",                  False),
+            "consolidation":               r.get("consolidation",               False),
+            "consolidation_above_ma50":    r.get("consolidation_above_ma50",    False),
+            "rsi_divergence_bullish":      r.get("rsi_divergence_bullish",      False),
         }
         for r in records
     ]
@@ -360,6 +414,18 @@ def run(cutoff_date=None):
 
     out_path = OUT_DIR / "decisions.parquet"
     out_df.to_parquet(out_path, index=False)
+
+    # ── 7c. Decision Log — save dated snapshot for backtesting (never overwritten)
+    log_dir  = OUT_DIR / "log"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    run_date = cutoff.date() if cutoff else pd.Timestamp.today().date()
+    log_path = log_dir / f"{run_date}.parquet"
+    if log_path.exists():
+        print(f"  Log for {run_date} already exists — skipping (delete manually to overwrite).")
+    else:
+        out_df["run_date"] = str(run_date)
+        out_df.to_parquet(log_path, index=False)
+        print(f"  Decision log saved: {log_path}")
 
     # ── 8. Print summary
     print(f"\nSaved: {out_path}")

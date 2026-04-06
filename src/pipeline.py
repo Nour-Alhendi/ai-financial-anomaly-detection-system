@@ -27,19 +27,14 @@ if __name__ == "__main__":
     print("=" * 55)
     run_download()
 
-    # ── Steps 1–6: Full analysis pipeline
+    # ── Steps 1–3: Data quality + features + detection
     run_quality_pipeline()
     run_feature_pipeline()
     run_detection()
-    run_prediction_pipeline()
-    decisions_df = run_decision()
-    run_explainability()
-    log_anomalies(decisions_df)
-    run_daily_report()
 
-    # ── Step 7: Collect today's fundamental signals (earnings, insider, options)
+    # ── Step 4: Collect fundamental signals (needed by Decision Engine)
     print("\n" + "=" * 55)
-    print("STEP 7 — Collect fundamental signals")
+    print("STEP 4 — Collect fundamental signals")
     print("=" * 55)
 
     earnings_df = collect_earnings()
@@ -62,9 +57,16 @@ if __name__ == "__main__":
         out = save_valuation(valuation_df)
         print(f"Valuation saved → {out}")
 
-    # ── Step 8: Collect today's news sentiment (for future training)
+    # ── Step 5: Prediction + Decision + Explainability
+    run_prediction_pipeline()
+    decisions_df = run_decision()
+    run_explainability()
+    log_anomalies(decisions_df)
+    run_daily_report()
+
+    # ── Step 6: Collect news sentiment history (for future training)
     print("\n" + "=" * 55)
-    print("STEP 8 — Collect news sentiment history")
+    print("STEP 6 — Collect news sentiment history")
     print("=" * 55)
     sentiment_df = collect_sentiment()
     if not sentiment_df.empty:

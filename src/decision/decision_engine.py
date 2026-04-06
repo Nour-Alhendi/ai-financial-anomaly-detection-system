@@ -134,6 +134,33 @@ class AnomalyInput:
     volume_trend:   float = 1.0    # volume_ma5/volume_ma20: >1 = rising volume
     trend_strength: float = 0.0    # trend strength score
 
+    # VIX change (rate of fear increase)
+    vix_change:          float = 0.0    # daily VIX % change — large positive = fear spike
+
+    # Bullish technical signals (computed in decision_pipeline)
+    price_vs_ema20:      float = 0.0    # (close/ema20 - 1): short-term trend
+    golden_cross:        bool  = False  # MA50 crossed above MA200 in last 20 days
+    rsi_oversold_bounce: bool  = False  # RSI was < 30 recently, now recovered > 35
+    macd_cross_bullish:  bool  = False  # MACD crossed above signal line in last 5 days
+    hh_hl:               bool  = False  # Higher Highs + Higher Lows (uptrend structure)
+    volume_breakout:     bool  = False  # High-volume breakout after consolidation
+
+    # Bearish technical signals
+    death_cross:               bool = False  # MA50 crossed below MA200 in last 20 days
+    ll_lh:                     bool = False  # Lower Lows + Lower Highs (downtrend structure)
+    macd_cross_bearish:        bool = False  # MACD crossed below signal line in last 5 days
+    panic_volume:              bool = False  # Price drop + volume > 2x avg
+    volume_spike_no_recovery:  bool = False  # Volume spike 2-5 days ago, price still down
+    rsi_below_50_high_vol:     bool = False  # RSI < 50 declining with rising volume
+    rsi_oversold_no_bounce:    bool = False  # RSI < 35 still falling
+
+    # Neutral / WATCH signals
+    low_volume:               bool = False  # Volume < 70% of 20-day average
+    consolidation:            bool = False  # Price in tight range < 3% over last 10 days
+    consolidation_above_ma50: bool = False  # Consolidating above MA50 = bullish coil
+    # Divergence
+    rsi_divergence_bullish:   bool = False  # Price lower lows, RSI higher lows = reversal signal
+
 
 @dataclass
 class DecisionOutput:
@@ -323,6 +350,55 @@ def decide(inp: AnomalyInput) -> DecisionOutput:
         action   = "NONE"
         context  = "no significant signals"
 
+    # ── Bearish technical confirmation ────────────────────────────────────────
+    # Count how many bearish signals align — use to strengthen WARNING/CRITICAL
+    # and to upgrade WATCH → WARNING when multiple signals confirm.
+    bearish = []
+    if inp.death_cross:              bearish.append("death cross")
+    if inp.ll_lh:                    bearish.append("LH+LL")
+    if inp.macd_cross_bearish:       bearish.append("MACD bearish cross")
+    if inp.panic_volume:             bearish.append("panic selling")
+    if inp.volume_spike_no_recovery: bearish.append("vol spike no recovery")
+    if inp.rsi_oversold_no_bounce:   bearish.append("RSI still declining")
+    if inp.rsi_below_50_high_vol:    bearish.append("RSI<50 high vol")
+    if inp.price_vs_ma200 < 0 and inp.price_vs_ma50 < 0:
+                                     bearish.append("below MA50+MA200")
+    if inp.vix_change > 0.10:        bearish.append(f"VIX spike +{inp.vix_change:.0%}")
+
+    if bearish:
+        context += f" | bearish: {', '.join(bearish[:3])}"
+        # 3+ bearish signals on a WATCH → upgrade to WARNING
+        if len(bearish) >= 3 and severity == "WATCH":
+            severity = "WARNING"
+            action   = "MONITOR"
+            override_reason = f"{len(bearish)} bearish signals converging"
+        # Death cross alone on NORMAL/WATCH → at least WATCH
+        if inp.death_cross and severity == "NORMAL":
+            severity = "WATCH"
+            action   = "OBSERVE"
+
+    # ── Neutral / consolidation zone ──────────────────────────────────────────
+    # Detect sideways / uncertain market for WATCH/NORMAL classification
+    rsi_neutral = 45 <= inp.rsi <= 55
+    neutral = []
+    if rsi_neutral:        neutral.append("RSI neutral 45-55")
+    if inp.low_volume:     neutral.append("low volume")
+    # Consolidation context: above MA50 = bullish coil (handled in bullish score already)
+    #                        below MA50 = genuine sideways/bearish pause
+    if inp.consolidation and not inp.consolidation_above_ma50:
+        neutral.append("consolidating below MA50")
+    elif inp.consolidation and inp.consolidation_above_ma50:
+        context += " | bullish coil above MA50"   # informational only, not neutral
+
+    if neutral and severity == "NORMAL":
+        if len(neutral) >= 2:
+            severity = "WATCH"
+            action   = "OBSERVE"
+            override_reason = "sideways/uncertain market"
+        context += f" | {', '.join(neutral)}"
+    elif neutral and severity == "WATCH":
+        context += f" | {', '.join(neutral)}"
+
     # ── Caution flags (do not override severity, just flag) ────────────────
 
     # RSI overbought + elevated drawdown risk
@@ -383,9 +459,19 @@ def decide(inp: AnomalyInput) -> DecisionOutput:
             action   = "MONITOR"
         context += f" | insider selling ({inp.insider_sentiment:+.2f})"
 
-    # Options market showing fear → confirm risk
-    if inp.options_fear and severity in ("WATCH", "WARNING", "CRITICAL"):
+    # Options market showing fear → confirm or escalate risk
+    if inp.options_fear:
         context += f" | options fear (P/C={inp.put_call_ratio:.2f})"
+        # Extreme fear (P/C > 1.5): upgrade WATCH → WARNING
+        if inp.put_call_ratio > 1.5 and severity == "WATCH":
+            severity = "WARNING"
+            action   = "MONITOR"
+            override_reason = f"extreme options fear (P/C={inp.put_call_ratio:.2f})"
+        # Moderate fear (P/C > 1.2) + already WARNING: upgrade to CRITICAL
+        elif inp.put_call_ratio > 1.2 and severity == "WARNING":
+            severity = "CRITICAL"
+            action   = "EXIT"
+            override_reason = f"options fear confirms WARNING → CRITICAL (P/C={inp.put_call_ratio:.2f})"
 
     # REVIEW: conflicting signals (high anomaly but good fundamentals)
     if (anomaly_w >= ANOMALY_MEDIUM
@@ -460,23 +546,27 @@ def decide(inp: AnomalyInput) -> DecisionOutput:
     # ── Trading Signal ────────────────────────────────────────────────────────
 
     # ── Overbought EXIT (profit-taking) — checked before severity gates
-    # RSI > 75: stock is strongly overextended, smart to take profits
-    # regardless of whether there's an active anomaly signal
+    # RSI > 78 is the primary condition — at this level the stock is clearly overextended.
+    # Growth stocks (NVDA, TSLA) can sustain RSI > 70 for months, so 75 was too tight.
+    # Momentum check ensures we exit while the stock is still moving up, not after it's reversed.
     overbought_exit = (
-        inp.rsi > 75
-        and inp.price_vs_ma200 > 0.15   # well above MA200 = extended run
-        and mom_label in ("positive", "bounce")  # still moving up = classic exit point
+        inp.rsi > 78
+        and mom_label in ("positive", "bounce")
     )
 
     if severity == "CRITICAL":
-        # CRITICAL = strong ML signal + anomaly → always EXIT
+        # CRITICAL = strong ML signal + anomaly → always EXIT.
+        # Sentiment does NOT override this. Even positive news cannot reverse a CRITICAL
+        # ML signal — news is a lagging soft signal, the model is forward-looking.
+        # If sentiment is strongly positive and CRITICAL fires, that is a REVIEW case
+        # handled separately (see REVIEW block above). Here we trust the ML.
         trading_signal = "EXIT"
         exit_reason    = "risk"
 
     elif severity == "WARNING":
         # WARNING → EXIT only with strong ML conviction AND no active recovery.
         # Recovery check: if momentum_5 > 0.03 the stock is bouncing back — don't exit.
-        recovering = inp.momentum_5 > 0.03
+        recovering = inp.momentum_5 > 0.03 or inp.rsi_divergence_bullish
 
         strong_signal = p_dd >= 0.50 or anomaly_w >= 0.35
 
@@ -484,12 +574,12 @@ def decide(inp: AnomalyInput) -> DecisionOutput:
             trading_signal = "EXIT"
             exit_reason    = "risk"
         elif strong_signal and recovering:
-            # Risk is elevated but stock is actively recovering → HOLD and watch
+            # Risk is elevated but stock is actively recovering (momentum or RSI divergence)
             trading_signal = "HOLD"
             exit_reason    = ""
-            context += " | recovering momentum — hold, monitor closely"
+            note = "RSI divergence — potential reversal" if inp.rsi_divergence_bullish else "recovering momentum"
+            context += f" | {note} — hold, monitor closely"
         else:
-            # Past drawdown happened but ML disagrees it continues → HOLD
             trading_signal = "HOLD"
             exit_reason    = ""
 
@@ -506,7 +596,7 @@ def decide(inp: AnomalyInput) -> DecisionOutput:
     elif severity == "POSITIVE_SIGNAL":
         exit_reason = ""
         # POSITIVE_SIGNAL already guarantees: p_dd < 30%, no anomaly, RSI < 70,
-        # positive or pullback momentum. We add 4 structural gates:
+        # positive or pullback momentum. We add structural gates + bullish confirmation.
 
         # Gate 1: Trend intact — not more than 10% below MA200
         above_ma200  = inp.price_vs_ma200 > -0.10
@@ -520,10 +610,28 @@ def decide(inp: AnomalyInput) -> DecisionOutput:
         # Gate 4: Revenue — not collapsing
         revenue_ok   = inp.revenue_growth is None or inp.revenue_growth >= -0.10
 
-        if above_ma200 and regime_ok and valuation_ok and revenue_ok:
+        # Bullish confirmation score — how many technical signals align?
+        bullish = []
+        if inp.golden_cross:                      bullish.append("golden cross")
+        if inp.price_vs_ema20 > 0:                bullish.append("above EMA20")
+        if inp.rsi_oversold_bounce:               bullish.append("RSI bounce")
+        if inp.rsi_divergence_bullish:            bullish.append("RSI divergence")
+        if inp.macd_cross_bullish:                bullish.append("MACD cross")
+        if inp.hh_hl:                             bullish.append("HH+HL")
+        if inp.volume_breakout:                   bullish.append("vol breakout")
+        if inp.consolidation_above_ma50:          bullish.append("bullish coil")
+        if inp.obv_signal > 0:                    bullish.append("OBV buying")
+        if 50 <= inp.rsi <= 70:                   bullish.append("RSI bullish zone")
+        if inp.price_vs_ma50 > 0:                bullish.append("above MA50")
+        bullish_count = len(bullish)
+
+        if above_ma200 and regime_ok and valuation_ok and revenue_ok and bullish_count >= 2:
             trading_signal = "ENTRY"
+            context += f" | {bullish_count} bullish signals: {', '.join(bullish[:3])}"
         else:
             trading_signal = "HOLD"
+            if bullish_count > 0:
+                context += f" | bullish technicals developing ({bullish_count}: {', '.join(bullish[:2])})"
 
     elif severity == "NORMAL":
         exit_reason    = ""

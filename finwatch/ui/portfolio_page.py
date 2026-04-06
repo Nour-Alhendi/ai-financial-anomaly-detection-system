@@ -408,7 +408,7 @@ def _build_strategy(pos: dict, decision: dict, current_price: float) -> str:  # 
 
     reasons = []
     if p_drawdown_cv >= 0.60:
-        reasons.append(f"<strong>High drawdown risk:</strong> {p_drawdown_cv*100:.0f}% probability of a >5% drop in the next 20 days.")
+        reasons.append(f"<strong>High drawdown risk:</strong> {p_drawdown_cv*100:.0f}% probability of a >5% drop in the next 10 days.")
     elif p_drawdown_cv >= 0.45:
         reasons.append(f"Elevated drawdown probability: {p_drawdown_cv*100:.0f}% — monitor closely.")
     else:

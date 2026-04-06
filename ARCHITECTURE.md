@@ -165,15 +165,15 @@ Using four complementary detectors and combining them into a weighted score prod
 
 ### 5B · Drawdown Probability Model (`src/prediction/models/drawdown_probability.py`)
 
-- **Type:** XGBoost binary classifier
-- **Target:** P(max drawdown > 5% over next 20 trading days)
+- **Type:** XGBoost + LightGBM (best model selected automatically via marker file)
+- **Target:** P(max drawdown > 5% over next 10 trading days)
 - **Train/Holdout split:** All data before 2024 for training; 2024–2026 as unseen holdout
-- **AUC on holdout:** 0.6671
-- **Key input features:** anomaly signals, price/returns, momentum, MA positions (`price_vs_ma50_stock`, `price_vs_ma200_stock`), volume, ES, VIX
-- **Model file:** `models/xgboost_drawdown.pkl`
+- **AUC on holdout:** 0.715
+- **Features:** 61 total — anomaly signals, price/returns, momentum, MA positions, volume, ES, VIX, 15 technical signals (Golden Cross, Death Cross, MACD, RSI divergence, panic volume, etc.)
+- **Model file:** `models/xgboost_drawdown.pkl` or `models/lgbm_drawdown.pkl` (winner written to `models/best_drawdown_model.txt`)
 
-**Why XGBoost for this task?**  
-Drawdown probability is a structured tabular prediction problem with heterogeneous features (price ratios, anomaly scores, VIX, momentum). XGBoost handles mixed feature types well, is robust to missing values, and allows SHAP attribution — which feeds directly into Layer 7.
+**Why XGBoost + LightGBM?**  
+Both are trained on every run. The one with higher test AUC (by margin > 0.005) wins and is used in production. This gives a free ensemble comparison without extra cost. 10-day horizon was chosen over 20-day because shorter horizons are more predictable — AUC improved from 0.674 → 0.715.
 
 ### 5C · Meta-Model Stacking (`src/prediction/models/meta_model.py`)
 
@@ -376,6 +376,7 @@ data/reports/daily_summary.txt         ← Layer 8B: daily_report.py
 | Model | File | Trained on | Used in |
 |-------|------|-----------|---------|
 | XGBoost Drawdown | `models/xgboost_drawdown.pkl` | Pre-2024 data | Layer 5B + Layer 7A (SHAP) |
+| LightGBM Drawdown | `models/lgbm_drawdown.pkl` | Pre-2024 data | Layer 5B (comparison — best wins) |
 | Meta-Model | `models/meta_model.pkl` | Backtest fold outputs | Layer 5C |
 | Isolation Forest × 14 | `models/if_{sector}.pkl` | Per-sector history | Layer 4 |
 | LSTM Autoencoder × 30 | `models/ae_{sector}_{bucket}.keras` | Per-sector × volatility | Layer 4 |

@@ -740,7 +740,7 @@ def render_strategy_box(det_df, dec_row) -> None:
     _ema_tip  = _tip("EMA20", "20-day Exponential Moving Average — short-term trend line.")
     _rsi_tip  = _tip("RSI", "Relative Strength Index. Above 70: overbought. Below 30: oversold.")
     _mom_tip  = _tip("Momentum", "Speed and direction of recent price change.")
-    _dd_tip   = _tip("Drawdown prob", "AI probability of a >5% price drop in the next 20 days.")
+    _dd_tip   = _tip("Drawdown prob", "AI probability of a >5% price drop in the next 10 days.")
     _anom_tip = _tip("anomaly detectors", "AI models that flag unusual price or volume behavior.")
     _pe_tip   = _tip("P/E", "Price-to-Earnings ratio — how much investors pay per $1 of earnings.")
     _rev_tip  = _tip("Revenue growth", "Year-over-year change in company revenue.")

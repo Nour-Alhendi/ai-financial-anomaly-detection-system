@@ -26,7 +26,10 @@ load_dotenv(ROOT / ".env")
 
 MODEL       = "llama-3.3-70b-versatile"
 TEMPERATURE = 0.2
-MAX_TOKENS  = 1100
+MAX_TOKENS  = 700   # reduced from 1100 — saves ~35% tokens per call
+
+DAILY_TOKEN_BUDGET = 80_000   # stay safely under Groq free tier (100k/day)
+_tokens_used = 0              # tracked across calls in this run
 
 LANGUAGE_INSTRUCTION = {
     "english": "Respond in English.",
@@ -283,8 +286,15 @@ News Sentiment: {news_sentiment}"""
 
 def summarize(row: dict, language: str = "english", retries: int = 4) -> str:
     """Generate full analysis for one ticker. Falls back to narrative_text on failure."""
+    global _tokens_used
+
     api_key = os.environ.get("GROQ_API_KEY")
     if not api_key:
+        return row.get("narrative_text", "")
+
+    # Stop if daily budget is nearly exhausted
+    if _tokens_used >= DAILY_TOKEN_BUDGET:
+        logging.warning(f"[llm_narrator] Daily token budget ({DAILY_TOKEN_BUDGET:,}) reached — skipping {row.get('ticker', '?')}")
         return row.get("narrative_text", "")
 
     client = Groq(api_key=api_key)
@@ -296,8 +306,16 @@ def summarize(row: dict, language: str = "english", retries: int = 4) -> str:
                 temperature=TEMPERATURE,
                 max_tokens=MAX_TOKENS,
             )
+            used = getattr(response.usage, "total_tokens", MAX_TOKENS + 700)
+            _tokens_used += used
             return response.choices[0].message.content.strip()
         except Exception as e:
+            err_str = str(e)
+            # Token-per-day limit hit — stop retrying entirely
+            if "tokens per day" in err_str or "TPD" in err_str:
+                logging.warning(f"[llm_narrator] Daily token limit hit — stopping narrator for today.")
+                _tokens_used = DAILY_TOKEN_BUDGET  # mark budget as exhausted
+                return row.get("narrative_text", "")
             wait = 2 ** attempt
             logging.warning(
                 f"[llm_narrator] {row.get('ticker', '?')} attempt {attempt+1} failed: {e} "
